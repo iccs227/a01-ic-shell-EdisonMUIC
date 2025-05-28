@@ -10,11 +10,11 @@
 #define MAX_CMD_BUFFER 255
 
 int main() {
-    printf("Starting IC shell\n");
-    printf("Welcome to ICSH by Edison\n");
-
     char buffer[MAX_CMD_BUFFER];
     char preBuffer[MAX_CMD_BUFFER] = "";
+
+    printf("Starting IC shell\n");
+    printf("Welcome to ICSH by Edison\n");
 
     while (1) {
         printf("icsh $ ");
