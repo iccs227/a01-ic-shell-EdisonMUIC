@@ -9,9 +9,23 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/wait.h>
+#include <signal.h>
 
 #define MAX_CMD_BUFFER 255
 #define BUFSIZE 1024
+
+pid_t foregroundPid = -1;
+int lastExitStatus = 0;
+
+void sigIntHandler(int sig) {
+    if (foregroundPid > 0) {kill(foregroundPid, SIGINT); printf("\n");}
+    else {printf("\n");}
+}
+
+void sigStpHandler(int sig) {
+    if (foregroundPid > 0) {kill(foregroundPid, SIGTSTP); printf("\n");}
+    else {printf("\n");}
+}
 
 void externalCommandFunc(char* buffer, char* preBuffer) {
     char *argv[MAX_CMD_BUFFER];
@@ -36,11 +50,20 @@ void externalCommandFunc(char* buffer, char* preBuffer) {
     if (pid == 0) {
         execvp(argv[0], argv);
         printf("bad command\n");
+        lastExitStatus = 1;
         exit(1);
     }
 
+
+    foregroundPid = pid;
     int status;
-    wait(&status);
+    waitpid(foregroundPid, &status, WUNTRACED);
+    foregroundPid = -1;
+
+    if (WIFEXITED(status)) { lastExitStatus = WEXITSTATUS(status); }
+    else if (WIFSTOPPED(status)) { lastExitStatus = WSTOPSIG(status); }
+    else if (WIFSIGNALED(status)) { lastExitStatus = WTERMSIG(status); }
+    else { lastExitStatus = 1; }
 }
 
 int commandFunc(char* buffer, char* preBuffer) {
@@ -51,14 +74,19 @@ int commandFunc(char* buffer, char* preBuffer) {
     if (strlen(buffer) == 0) {
         return 0;
     }
+    else if (strcmp(buffer, "echo $?") == 0) {
+        printf("%d\n", lastExitStatus);
+    }
     else if (strncmp(buffer, "echo ", 5) == 0) {
         char *strToPrint = buffer + 5;
         printf("%s\n", strToPrint);
     }
     else if (strncmp(buffer, "!!", 2) == 0 && strlen(buffer) == 2) {
-        printf("%s\n", preBuffer);
-        strcpy(tempBuffer, preBuffer);
-        commandFunc(tempBuffer, preBuffer);
+        if (strlen(preBuffer) != 0) {
+            printf("%s\n", preBuffer);
+            strcpy(tempBuffer, preBuffer);
+            commandFunc(tempBuffer, preBuffer);
+        }
         return 0;
     }
     else if (strncmp(buffer, "exit ", 5) == 0 && strlen(buffer) >= 6) {
@@ -76,6 +104,13 @@ int commandFunc(char* buffer, char* preBuffer) {
 }
 
 int main(int argc, char* argv[]) {
+    struct sigaction sa_int = {0}, sa_tstp = {0};
+    sa_int.sa_handler = sigIntHandler;
+    sa_tstp.sa_handler = sigStpHandler;
+
+    sigaction(SIGINT, &sa_int, NULL);
+    sigaction(SIGTSTP, &sa_tstp, NULL);
+
     char buffer[MAX_CMD_BUFFER];
     char preBuffer[MAX_CMD_BUFFER] = "";
     int exitCode = 0;
@@ -113,7 +148,13 @@ int main(int argc, char* argv[]) {
 
     while (1) {
         printf("icsh $ ");
-        fgets(buffer, 255, stdin);
+        fflush(stdout);
+
+        if (fgets(buffer, MAX_CMD_BUFFER, stdin) == NULL) {
+            clearerr(stdin);
+            continue;
+        }
+
         commandFunc(buffer, preBuffer);
     }
 }
