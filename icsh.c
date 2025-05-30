@@ -31,10 +31,28 @@ void externalCommandFunc(char* buffer, char* preBuffer) {
     char *argv[MAX_CMD_BUFFER];
     int argc = 0;
 
+    char temp[MAX_CMD_BUFFER];
+    strcpy(temp, buffer);
+
+    char *inputFile = NULL;
+    char *outputFile = NULL;
+
     char *argument = strtok(buffer, " ");
     while (argument != NULL && argc < MAX_CMD_BUFFER - 1) {
-        argv[argc] = argument;
-        argc++;
+        if (strcmp(argument, "<") == 0) {
+            argument = strtok(NULL, " ");
+            if (argument != NULL) {inputFile = argument;}
+            else {printf("Error: Empty argument after <\n"); return;}
+        }
+        else if (strcmp(argument, ">") == 0) {
+            argument = strtok(NULL, " ");
+            if (argument != NULL) {outputFile = argument;}
+            else {printf("Error: Empty argument after >\n"); return;}
+        }
+        else {
+            argv[argc] = argument;
+            argc++;
+        }
         argument = strtok(NULL, " ");
     }
     argv[argc] = NULL;
@@ -48,6 +66,26 @@ void externalCommandFunc(char* buffer, char* preBuffer) {
     }
 
     if (pid == 0) {
+        if (inputFile != NULL) {
+            int inputFd = open(inputFile, O_RDONLY);
+            if (inputFd < 0) {
+                perror("Input file open failed");
+                exit(1);
+            }
+            dup2(inputFd, STDIN_FILENO);
+            close(inputFd);
+        }
+
+        if (outputFile != NULL) {
+            int outputFd = open(outputFile, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+            if (outputFd < 0) {
+                perror("Output file open failed");
+                exit(1);
+            }
+            dup2(outputFd, STDOUT_FILENO);
+            close(outputFd);
+        }
+
         execvp(argv[0], argv);
         printf("bad command\n");
         lastExitStatus = 1;
