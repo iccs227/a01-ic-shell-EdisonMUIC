@@ -13,18 +13,86 @@
 
 #define MAX_CMD_BUFFER 255
 #define BUFSIZE 1024
+#define JOBSIZE 100
 
 pid_t foregroundPid = -1;
 int lastExitStatus = 0;
 
-void sigIntHandler(int sig) {
-    if (foregroundPid > 0) {kill(foregroundPid, SIGINT); printf("\n");}
-    else {printf("\n");}
+typedef struct {
+    int id;
+    pid_t pid;
+    char command[MAX_CMD_BUFFER];
+    int isRunning;
+} Job;
+
+Job jobList[JOBSIZE];
+int jobCount = 0;
+int nextJobId = 1;
+
+void addJob(pid_t pid, char* cmd) {
+    int added = 0;
+    for (int i = 0; i < jobCount; i++) {
+        if (jobList[i].pid == pid) {added = 1;}
+    }
+    if (jobCount < JOBSIZE && added == 0) {
+        jobList[jobCount].id = nextJobId;
+        nextJobId++;
+        jobList[jobCount].pid = pid;
+        strncpy(jobList[jobCount].command, cmd, MAX_CMD_BUFFER);
+        jobList[jobCount].isRunning = 0;
+        jobCount++;
+    }
 }
 
-void sigStpHandler(int sig) {
-    if (foregroundPid > 0) {kill(foregroundPid, SIGTSTP); printf("\n");}
-    else {printf("\n");}
+void removeJob(pid_t pid) {
+    for (int i = 0; i < jobCount; i++) {
+        if (jobList[i].pid == pid) {
+            for (int j = i; j < jobCount - 1; ++j) {
+                jobList[j] = jobList[j + 1];
+            }
+            jobCount--;
+            break;
+        }
+    }
+}
+
+void listJobs() {
+    for (int i = 0; i < jobCount; i++) {
+        int cmdLen = strlen(jobList[i].command);
+        if (jobList[i].command[cmdLen - 1] != '&') {strcat(jobList[i].command, " &");}
+        if (jobList[i].isRunning == 1) {printf("Running [%d] %d %s\n", jobList[i].id, jobList[i].pid, jobList[i].command);}
+        else if (jobList[i].isRunning == 0) {printf("Stopped [%d] %d %s\n", jobList[i].id, jobList[i].pid, jobList[i].command);}
+    }
+}
+
+Job* findJob(int id) {
+    for (int i = 0; i < jobCount; i++) {
+        if (jobList[i].id == id) {return &jobList[i];}
+    }
+    return NULL;
+}
+
+Job* findJobByPid(pid_t pid) {
+    for (int i = 0; i < jobCount; i++) {
+        if (jobList[i].pid == pid) {return &jobList[i];}
+    }
+    return NULL;
+}
+
+void signalHandler(int sig) {
+    if (sig == SIGINT) {
+        if (foregroundPid > 0) {kill(-foregroundPid, SIGINT);}
+        else {printf("\n");}
+    }
+    else if (sig == SIGTSTP) {
+        if (foregroundPid > 0) {kill(-foregroundPid, SIGTSTP);}
+        else {printf("\n");}
+    }
+    else if (sig == SIGCHLD) {
+        int status;
+        pid_t pid;
+        while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {removeJob(pid);}
+    }
 }
 
 void externalCommandFunc(char* buffer, char* preBuffer) {
@@ -37,9 +105,13 @@ void externalCommandFunc(char* buffer, char* preBuffer) {
     char *inputFile = NULL;
     char *outputFile = NULL;
 
+    int isBackground = 0;
     char *argument = strtok(buffer, " ");
     while (argument != NULL && argc < MAX_CMD_BUFFER - 1) {
-        if (strcmp(argument, "<") == 0) {
+        if (strcmp(argument, "&") == 0) {
+            isBackground = 1;
+        }
+        else if (strcmp(argument, "<") == 0) {
             argument = strtok(NULL, " ");
             if (argument != NULL) {inputFile = argument;}
             else {printf("Error: Empty argument after <\n"); return;}
@@ -66,6 +138,7 @@ void externalCommandFunc(char* buffer, char* preBuffer) {
     }
 
     if (pid == 0) {
+        setpgid(0, 0);
         if (inputFile != NULL) {
             int inputFd = open(inputFile, O_RDONLY);
             if (inputFd < 0) {
@@ -88,20 +161,33 @@ void externalCommandFunc(char* buffer, char* preBuffer) {
 
         execvp(argv[0], argv);
         printf("bad command\n");
-        lastExitStatus = 1;
         exit(1);
     }
-
-
-    foregroundPid = pid;
+    setpgid(pid, pid);
+    int w = 0;
     int status;
-    waitpid(foregroundPid, &status, WUNTRACED);
+    if (isBackground) {
+        printf("[%d] %d\n", nextJobId, pid);
+        addJob(pid, temp);
+    }
+    else {
+        foregroundPid = pid;
+        tcsetpgrp(STDIN_FILENO, foregroundPid);
+        w = waitpid(foregroundPid, &status, WUNTRACED);
+        tcsetpgrp(STDIN_FILENO, getpid());
+        foregroundPid = -1;
+    }
     foregroundPid = -1;
 
-    if (WIFEXITED(status)) { lastExitStatus = WEXITSTATUS(status); }
-    else if (WIFSTOPPED(status)) { lastExitStatus = WSTOPSIG(status); }
-    else if (WIFSIGNALED(status)) { lastExitStatus = WTERMSIG(status); }
-    else { lastExitStatus = 1; }
+    if (WIFEXITED(status)) {lastExitStatus = WEXITSTATUS(status);}
+    else if (WIFSTOPPED(status) && w != -1) {
+        Job* job = findJobByPid(pid);
+        if (job) {job->isRunning = 0;}
+        else {addJob(pid, temp);}
+        lastExitStatus = WSTOPSIG(status);
+    }
+    else if (WIFSIGNALED(status)) {lastExitStatus = WTERMSIG(status);}
+    else {lastExitStatus = 1;}
 }
 
 int commandFunc(char* buffer, char* preBuffer) {
@@ -119,6 +205,45 @@ int commandFunc(char* buffer, char* preBuffer) {
         char *strToPrint = buffer + 5;
         printf("%s\n", strToPrint);
     }
+    else if (strcmp(buffer, "jobs") == 0) {
+        listJobs();
+    }
+    else if (strncmp(buffer, "fg %", 4) == 0) {
+        int jobId = atoi(buffer + 4);
+        Job* job = findJob(jobId);
+        if (job != NULL) {
+            kill(-job->pid, SIGCONT);
+            job->isRunning = 1;
+
+            foregroundPid = job->pid;
+            tcsetpgrp(STDIN_FILENO, job->pid);
+
+            int status;
+            waitpid(job->pid, &status, WUNTRACED);
+
+            tcsetpgrp(STDIN_FILENO, getpid());
+            foregroundPid = -1;
+
+            if (WIFEXITED(status) || WIFSIGNALED(status)) {removeJob(job->pid);}
+            else if (WIFSTOPPED(status)) {job->isRunning = 0;}
+
+            if (WIFEXITED(status)) {lastExitStatus = WEXITSTATUS(status);}
+            else if (WIFSIGNALED(status)) {lastExitStatus = WTERMSIG(status);}
+            else if (WIFSTOPPED(status)) {lastExitStatus = WSTOPSIG(status);}
+            else {lastExitStatus = 1;}
+        }
+        else {printf("Can't find job with the provided ID.\n");}
+    }
+    else if (strncmp(buffer, "bg %", 4) == 0) {
+        int id = atoi(buffer + 4);
+        Job* job = findJob(id);
+        if (job && job->isRunning == 0) {
+            kill(-job->pid, SIGCONT);
+            job->isRunning = 1;
+            printf("Resumed [%d] %d %s\n", job->id, job->pid, job->command);
+        }
+        else {printf("Can't find job with the provided ID or Job is already running.\n");}
+    }
     else if (strncmp(buffer, "!!", 2) == 0 && strlen(buffer) == 2) {
         if (strlen(preBuffer) != 0) {
             printf("%s\n", preBuffer);
@@ -134,24 +259,32 @@ int commandFunc(char* buffer, char* preBuffer) {
     }
     else {
         strcpy(tempBuffer, buffer);
-        externalCommandFunc(buffer, preBuffer);
+        externalCommandFunc(tempBuffer, preBuffer);
         strcpy(preBuffer, tempBuffer);
     }
     strcpy(preBuffer, tempBuffer);
+
+    int status;
+    pid_t pid;
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        removeJob(pid);
+    }
     return 0;
 }
 
 int main(int argc, char* argv[]) {
-    struct sigaction sa_int = {0}, sa_tstp = {0};
-    sa_int.sa_handler = sigIntHandler;
-    sa_tstp.sa_handler = sigStpHandler;
-
-    sigaction(SIGINT, &sa_int, NULL);
-    sigaction(SIGTSTP, &sa_tstp, NULL);
+    signal(SIGINT, signalHandler);
+    signal(SIGTSTP, signalHandler);
+    signal(SIGCHLD, signalHandler);
 
     char buffer[MAX_CMD_BUFFER];
     char preBuffer[MAX_CMD_BUFFER] = "";
     int exitCode = 0;
+
+    pid_t shellpgid = getpid();
+    setpgid(shellpgid, shellpgid);
+    tcsetpgrp(STDIN_FILENO, shellpgid);
+    signal(SIGTTOU, SIG_IGN);
 
     printf("Starting IC shell\n");
     printf("Welcome to ICSH by Edison\n");
